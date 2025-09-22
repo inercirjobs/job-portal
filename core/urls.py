@@ -6,6 +6,7 @@ from . import views
 router = DefaultRouter()
 router.register(r'users', views.UserViewSet)
 router.register(r'admin', views.AdminViewSet)
+router.register(r'resumes', views.ResumeViewSet, basename='resume')
 
 urlpatterns = [
     
@@ -28,9 +29,11 @@ urlpatterns = [
     
     
     path('contact', views.contact_view, name='contact'),
-
-    
+    path('walkins/', views.public_walkins_view, name='public_walkins'),
+    path('walkins/<str:walkin_id>/', views.public_single_walkin_view, name='walkins-detail'),
+    path('walkins/apply/<str:walkin_id>/', views.apply_walkin, name='apply_walkin'),
     path('jobs/post/', views.post_job_view, name='post-job'),  # HR only
+    path('jobs/post-csv/', views.post_jobs_from_csv, name='post-jobs-from-csv'),
     path('jobs/<str:job_id>/apply/', views.apply_to_job, name='apply-job'),
     path('jobs/all/', views.all_jobs_view, name='all-jobs'),  # Admin only
     path('jobs/created/all', views.all_jobs_created_view, name='all-jobs'),  # hr only
@@ -95,6 +98,14 @@ urlpatterns = [
     path('admin/contact-list/', views.AdminViewSet.as_view({'get': 'contact_list'}), name='admin-contact-list'),
     path('admin/edit-role/<str:pk>/', views.AdminViewSet.as_view({'patch': 'edit_user_role'}), name='edit-user-role'),
     path('admin/subscriptions/', views.AdminViewSet.as_view({'get': 'all_subscriptions'}), name='all-subscriptions'),
+    path('admin/payment-data/', views.AdminViewSet.as_view({'get': 'list_all_payments'}), name='all-payment'),
+    path('admin/create-walkin/', views.AdminViewSet.as_view({'post': 'create_walkin'}), name='create_walkin'),
+    path('admin/edit-walkin/<str:pk>/', views.AdminViewSet.as_view({'put': 'edit_walkin'}), name='edit_walkin'),
+    path('admin/delete-walkin/<str:pk>/', views.AdminViewSet.as_view({'delete': 'delete_walkin'}), name='delete_walkin'),
+    path('admin/walkins/', views.AdminViewSet.as_view({'get': 'list_walkins'}), name='list_walkins'),
+    path('admin/walkins/<str:pk>/', views.AdminViewSet.as_view({'get': 'retrieve_walkin'}), name='retrieve_walkin'),
+    path('admin/walkins-applications/', views.AdminViewSet.as_view({'get': 'walkin_applications'}), name='walkin_applications'),
+
 
 
     
@@ -113,8 +124,29 @@ urlpatterns = [
     
     
     # path('favicon.ico', views.favicon_view),
+    path('resumes/<int:pk>/download/', views.ResumeViewSet.as_view({'get': 'download_url'}), name='resume-download'),
+# GET /api/resumes/	Normal user: List only their resumes
+# GET /api/resumes/?user=2	Staff: List resumes belonging to user with ID 2
+# POST /api/resumes/	Upload new resume (user automatically set to requester)
+# GET /api/resumes/5/	Retrieve resume with ID 5
+# GET /api/resumes/5/download/	Get presigned download URL for resume ID 5
 
+    path("create-one-time-payment/", views.create_one_time_payment, name="create-one-time-payment"),
+    path("verify-subscription/", views.verify_payment_status, name="verify-subscription"),
     
+    
+    
+    
+    
+    
+    # path("create-subscription/", views.create_subscription, name="create-subscription"),
+    path("raise-subscription-charge/", views.raise_subscription_charge, name="raise-subscription-charge"),
+    path("webhook/", views.subscription_webhook, name="subscription-webhook"),
+    path("cashfree/webhook/", views.cashfree_webhook, name="subscription-webhook"),
+
+
+
+
     # API routes
     path('', include(router.urls)),
 ]

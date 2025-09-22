@@ -1,6 +1,11 @@
 import boto3
 import time
 import os
+import csv
+import io
+import re
+from django.core.mail import send_mass_mail
+from django.core.mail import EmailMultiAlternatives
 import razorpay
 import random
 from botocore.exceptions import ClientError
@@ -12,15 +17,18 @@ from django.conf import settings
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
-from .models import User, AdminUser,Job,JobApplication,Contact,UserSubscription
+from .models import User, AdminUser,Job,JobApplication,Contact,Subscription,Payment_PG,WalkInDrive,WalkInApplication
 from django.utils import timezone
 from .serializers import (
     UserRegistrationSerializer, UserSerializer, LoginSerializer,
     AdminUserSerializer,JobSerializer,JobApplicationSerializer,CompanySerializer,HrUserSerializer,
     ResetPasswordSerializer,RequestOTPSerializer,VerifyOTPSerializer,ChangePasswordSerializer,ContactSerializer,
-    UserSubscriptionSerializer
+    UserSubscriptionSerializer,PaymentPGSerializer,WalkInDriveSerializer,WalkInApplicationSerializer,
 )
-from .utils import generate_presigned_url
+from django.utils.timezone import now
+# from .utils.s3_signed import generate_presigned_url
+from core.utils import build_presigned_get_url, generate_presigned_url
+
 from google.oauth2 import id_token
 # from google.oauth2 import id_token
 # from google.auth.transport import requests
@@ -50,8 +58,14 @@ from django.http import HttpResponseBadRequest
 from razorpay.errors import SignatureVerificationError
 client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
 from django.http import StreamingHttpResponse
+import pytz
+from datetime import datetime, timedelta
 
 import tempfile
+
+ist = pytz.timezone('Asia/Kolkata')
+schedule_time = datetime.now(ist) + timedelta(minutes=2)
+payment_schedule_date = schedule_time.isoformat()
 
 def verify_signature(payment_id, subscription_id, signature, secret):
     msg = f"{payment_id}|{subscription_id}".encode()
@@ -208,6 +222,49 @@ def contact_view(request):
 #     }
 #     return role_urls.get(role, '/dashboard')
 
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def public_walkins_view(request):
+    walkins = WalkInDrive.objects.all().order_by('-date')
+    serializer = WalkInDriveSerializer(walkins, many=True)
+    return Response({
+        "message": "Walk-in drives fetched successfully.",
+        "count": len(serializer.data),
+        "data": serializer.data
+    }, status=status.HTTP_200_OK)
+    
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def public_single_walkin_view(request, walkin_id):
+    try:
+        walkin = WalkInDrive.objects.get(pk=walkin_id)
+        serializer = WalkInDriveSerializer(walkin)
+        return Response({
+            "message": "Walk-in drive fetched successfully.",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+    except WalkInDrive.DoesNotExist:
+        return Response({
+            "message": "Walk-in drive not found."
+        }, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def apply_walkin(request, walkin_id):
+    try:
+        walkin = WalkInDrive.objects.get(pk=walkin_id)
+    except WalkInDrive.DoesNotExist:
+        return Response({"error": "Walk-in drive not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    serializer = WalkInApplicationSerializer(data=request.data)
+    if serializer.is_valid():
+        serializer.save(walkin=walkin)
+        return Response({
+            "message": "Applied successfully!",
+            "data": serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 # ViewSets
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().order_by('-created_at')
@@ -270,8 +327,19 @@ class UserViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def profile(self, request):
-        serializer = self.get_serializer(request.user)
-        return Response(serializer.data)
+        user = request.user
+        serializer = self.get_serializer(user)
+        data = serializer.data.copy()
+
+        # Replace 'resume' with a freshly generated pre-signed URL
+        if user.resume_key:
+            signed_url = generate_presigned_url(user.resume_key)
+            if signed_url:
+                data['resume'] = signed_url  # override resume field with signed link
+            else:
+                data['resume'] = None  # fallback if generation fails
+
+        return Response(data)
     
     @action(detail=False, methods=['get'], url_path='companies-list')
     def companies_list(self, request):
@@ -510,71 +578,81 @@ class UserViewSet(viewsets.ModelViewSet):
             # 🔝 this working
             
 
-    @action(detail=False, methods=['post'], url_path='confirm-subscription-payment')
-    def confirm_subscription_payment(self, request):
-        user = request.user
-        data = request.data
+    # @action(detail=False, methods=['post'], url_path='confirm-subscription-payment')
+    # def confirm_subscription_payment(self, request):
+    #     user = request.user
+    #     data = request.data
 
-        razorpay_payment_id = data.get('razorpay_payment_id')
-        razorpay_subscription_id = data.get('razorpay_subscription_id')
-        razorpay_signature = data.get('razorpay_signature')
+    #     razorpay_payment_id = data.get('razorpay_payment_id')
+    #     razorpay_subscription_id = data.get('razorpay_subscription_id')
+    #     razorpay_signature = data.get('razorpay_signature')
 
-        if not all([razorpay_payment_id, razorpay_subscription_id, razorpay_signature]):
-            return Response({"detail": "Missing payment information."}, status=status.HTTP_400_BAD_REQUEST)
+    #     if not all([razorpay_payment_id, razorpay_subscription_id, razorpay_signature]):
+    #         return Response({"detail": "Missing payment information."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Manually verify signature
-        if not verify_signature(
-            razorpay_payment_id,
-            razorpay_subscription_id,
-            razorpay_signature,
-            settings.RAZORPAY_KEY_SECRET
-        ):
-            return Response({"detail": "Invalid payment signature."}, status=status.HTTP_400_BAD_REQUEST)
+    #     # Manually verify signature
+    #     if not verify_signature(
+    #         razorpay_payment_id,
+    #         razorpay_subscription_id,
+    #         razorpay_signature,
+    #         settings.RAZORPAY_KEY_SECRET
+    #     ):
+    #         return Response({"detail": "Invalid payment signature."}, status=status.HTTP_400_BAD_REQUEST)
 
-        client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+    #     client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
 
-        try:
-            subscription_details = client.subscription.fetch(razorpay_subscription_id)
-        except Exception as e:
-            return Response({
-                "detail": "Failed to fetch subscription details.",
-                "error": str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
+    #     try:
+    #         subscription_details = client.subscription.fetch(razorpay_subscription_id)
+    #     except Exception as e:
+    #         return Response({
+    #             "detail": "Failed to fetch subscription details.",
+    #             "error": str(e)
+    #         }, status=status.HTTP_400_BAD_REQUEST)
 
-        plan_id = subscription_details.get('plan_id')
-        plan_amount = 0
-        plan_name = ''
+    #     plan_id = subscription_details.get('plan_id')
+    #     plan_amount = 0
+    #     plan_name = ''
 
-        if plan_id:
-            try:
-                plan_details = client.plan.fetch(plan_id)
-                plan_amount = plan_details.get('amount', 0)  # amount is in paise
-                plan_name = plan_details.get('item', {}).get('name', '')
-            except Exception:
-                plan_amount = 0
-                plan_name = ''
+    #     if plan_id:
+    #         try:
+    #             plan_details = client.plan.fetch(plan_id)
+    #             plan_amount = plan_details.get('amount', 0)  # amount is in paise
+    #             plan_name = plan_details.get('item', {}).get('name', '')
+    #         except Exception:
+    #             plan_amount = 0
+    #             plan_name = ''
 
-        sub_obj, created = UserSubscription.objects.get_or_create(
-            user=user,
-            razorpay_subscription_id=razorpay_subscription_id,
-            defaults={
-                'plan_name': plan_name,
-                'plan_amount': plan_amount / 100,  # paise to INR
-                'subscribe_date': timezone.now(),
-                'end_date': timezone.now() + timedelta(days=30 * 12),
-                'next_renewal_date': timezone.now() + timedelta(days=30),
-            }
-        )
+    #     sub_obj, created = UserSubscription.objects.get_or_create(
+    #         user=user,
+    #         razorpay_subscription_id=razorpay_subscription_id,
+    #         defaults={
+    #             'plan_name': plan_name,
+    #             'plan_amount': plan_amount / 100,  # paise to INR
+    #             'subscribe_date': timezone.now(),
+    #             'end_date': timezone.now() + timedelta(days=30 * 12),
+    #             'next_renewal_date': timezone.now() + timedelta(days=30),
+    #         }
+    #     )
 
-        # ✅ Update user model as well
-        user.plan = plan_name
-        user.subscribe_date = timezone.now()
-        user.save()
+    #     # ✅ Update user model as well
+    #     user.plan = plan_name
+    #     user.subscribe_date = timezone.now()
+    #     user.save()
 
-        return Response({
-            "detail": "Subscription verified and saved successfully.",
-            "subscription": UserSubscriptionSerializer(sub_obj).data
-        }, status=status.HTTP_200_OK)
+    #     return Response({
+    #         "detail": "Subscription verified and saved successfully.",
+    #         "subscription": UserSubscriptionSerializer(sub_obj).data
+    #     }, status=status.HTTP_200_OK)
+
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from django.db.models import Q
+
+class Pagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 class AdminViewSet(viewsets.ModelViewSet):
     queryset = AdminUser.objects.all()
@@ -587,11 +665,7 @@ class AdminViewSet(viewsets.ModelViewSet):
         serializer = UserSerializer(pending_users, many=True)
         return Response(serializer.data)
 
-    @action(detail=False, methods=['get'])
-    def all_subscriptions(self, request):
-        subscriptions = UserSubscription.objects.all()
-        serializer = UserSubscriptionSerializer(subscriptions, many=True)
-        return Response(serializer.data)
+
     
     @action(detail=True, methods=['post'])
     def verify_company(self, request, pk=None):
@@ -618,9 +692,35 @@ class AdminViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def users_all(self, request):
-        users = User.objects.filter(role='user')
-        serializer = UserSerializer(users, many=True)
-        return Response(serializer.data)
+        search = request.GET.get('search', '')
+        user_id = request.GET.get('id', None)
+        plan = request.GET.get('plan', '')
+
+        queryset = User.objects.filter(role='user').order_by('-date_joined')
+
+        # Filter by ID
+        if user_id:
+            queryset = queryset.filter(id=user_id)
+
+        # Filter by plan
+        if plan:
+            queryset = queryset.filter(plan=plan)
+
+        # Search by email, full_name, username, or phone
+        if search:
+            queryset = queryset.filter(
+                Q(email__icontains=search) |
+                Q(full_name__icontains=search) |
+                Q(username__icontains=search) |
+                Q(phone__icontains=search)
+            )
+
+        # Apply pagination
+        paginator = Pagination()
+        page = paginator.paginate_queryset(queryset, request)
+
+        serializer = UserSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
     
     @action(detail=False, methods=['get'], url_path='get-resume-url')
     def get_resume_url(self, request):
@@ -672,31 +772,151 @@ class AdminViewSet(viewsets.ModelViewSet):
     #             time.sleep(1)
 
     #     return StreamingHttpResponse(user_generator(), content_type='application/x-ndjson')
-
     @action(detail=False, methods=['get'])
     def companies_all(self, request):
-        companies = User.objects.filter(role='hr')
-        serializer = UserSerializer(companies, many=True)
-        return Response(serializer.data)
+        search = request.GET.get('search', '')
+        user_id = request.GET.get('id', None)
+
+        queryset = User.objects.filter(role='hr').order_by('-date_joined')
+
+        # Filter by ID
+        if user_id:
+            queryset = queryset.filter(id=user_id)
+
+        # Search across multiple fields
+        if search:
+            queryset = queryset.filter(
+                Q(username__icontains=search) |
+                Q(email__icontains=search) |
+                Q(full_name__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(company_name__icontains=search)
+            )
+
+        # Apply pagination
+        paginator = Pagination()
+        page = paginator.paginate_queryset(queryset, request)
+
+        serializer = UserSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
     
     @action(detail=False, methods=['get'])
     def admin_list(self, request):
-        admins = User.objects.filter(role='admin')
-        serializer = UserSerializer(admins, many=True)
-        return Response(serializer.data)
+        search = request.GET.get('search', '')
+        user_id = request.GET.get('id', None)
 
+        queryset = User.objects.filter(role='admin').order_by('-date_joined')
 
+        # Filter by ID
+        if user_id:
+            queryset = queryset.filter(id=user_id)
+
+        # Search by username, email, or phone
+        if search:
+            queryset = queryset.filter(
+                Q(username__icontains=search) |
+                Q(email__icontains=search) |
+                Q(phone__icontains=search)
+            )
+
+        # Apply pagination
+        paginator = Pagination()
+        page = paginator.paginate_queryset(queryset, request)
+
+        serializer = UserSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    # @action(detail=False, methods=['get'])
+    # def jobs_all(self, request):
+    #     jobs = Job.objects.all().order_by('-created_at')
+    #     serializer = JobSerializer(jobs, many=True)
+    #     return Response(serializer.data)
+    
+    
+    
     @action(detail=False, methods=['get'])
     def jobs_all(self, request):
-        jobs = Job.objects.all().order_by('-created_at')
-        serializer = JobSerializer(jobs, many=True)
-        return Response(serializer.data)
+        search = request.GET.get('search', '')
+        location = request.GET.get('location', '')
+        job_type = request.GET.get('job_type', '')
+        department = request.GET.get('department', '')
+        experience_level = request.GET.get('experience_level', '')
+        education = request.GET.get('education', '')
+        min_salary = request.GET.get('min_salary', None)
+        max_salary = request.GET.get('max_salary', None)
+        company_type = request.GET.get('company_type', '')
+
+        queryset = Job.objects.all().order_by('-created_at')
+
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search) |
+                Q(skills__icontains=search)
+            )
+
+        if location:
+            queryset = queryset.filter(location__icontains=location)
+
+        if job_type and job_type != 'all':
+            queryset = queryset.filter(job_type=job_type)
+
+        if department:
+            departments = [d.strip() for d in department.split(',')]
+            queryset = queryset.filter(department__in=departments)
+
+        if experience_level:
+            levels = [lvl.strip() for lvl in experience_level.split(',')]
+            queryset = queryset.filter(experience_level__in=levels)
+
+        if education:
+            educations = [ed.strip() for ed in education.split(',')]
+            queryset = queryset.filter(education__in=educations)
+
+        if min_salary:
+            queryset = queryset.filter(min_salary__gte=min_salary)
+
+        if max_salary:
+            queryset = queryset.filter(max_salary__lte=max_salary)
+
+        if company_type:
+            company_types = [ct.strip() for ct in company_type.split(',')]
+            queryset = queryset.filter(created_by__company_type__in=company_types)
+
+        # Paginate the queryset
+        paginator = Pagination()
+        page = paginator.paginate_queryset(queryset, request)
+
+        # Serialize the paginated data
+        serializer = JobSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
     
     @action(detail=False, methods=['get'])
     def all_applications(self, request):
-        applications = JobApplication.objects.all().select_related('job', 'applied_by', 'job__created_by')
-        serializer = JobApplicationSerializer(applications, many=True)
-        return Response(serializer.data)
+        search = request.GET.get('search', '')
+        status = request.GET.get('status', '')
+
+        queryset = JobApplication.objects.all().select_related('applied_by', 'job', 'job__created_by')
+
+        # Corrected search filter using related fields
+        if search:
+            queryset = queryset.filter(
+                Q(job__title__icontains=search) |
+                Q(job__created_by__company_name__icontains=search) |  # company_name likely from job creator
+                Q(name__icontains=search) |
+                Q(applied_by__email__icontains=search) |
+                Q(applied_by__full_name__icontains=search) |
+                Q(applied_by__phone__icontains=search)
+            )
+
+        # Status filter
+        if status:
+            queryset = queryset.filter(status__iexact=status)
+
+        paginator = Pagination()
+        page = paginator.paginate_queryset(queryset.order_by('-id'), request)
+
+        serializer = JobApplicationSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
     
     @action(detail=True, methods=['patch'], url_path='edit-role', permission_classes=[IsAdmin])
     def edit_user_role(self, request, pk=None):
@@ -718,10 +938,256 @@ class AdminViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='contact-list')
     def contact_list(self, request):
-        contacts = Contact.objects.all().order_by('-created_at')  # Optional ordering
-        serializer = ContactSerializer(contacts, many=True)
-        return Response(serializer.data)
+        search = request.GET.get('search', '')
 
+        queryset = Contact.objects.all().order_by('-created_at')
+
+        if search:
+            queryset = queryset.filter(
+                Q(full_name__icontains=search) |
+                Q(email__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(inquiry__icontains=search)
+            )
+
+        paginator = Pagination()
+        page = paginator.paginate_queryset(queryset, request)
+
+        serializer = ContactSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+    
+    @action(detail=False, methods=['get'], url_path='all')
+    def list_all_payments(self, request):
+        search = request.GET.get('search', '')
+        plan = request.GET.get('plan', '')
+        status_param = request.GET.get('status', '')
+
+        queryset = Payment_PG.objects.select_related('user').all().order_by('-created_at')
+
+        # ✅ Search by user's email
+        if search:
+            queryset = queryset.filter(user__email__icontains=search)
+
+        # ✅ Filter by plan
+        if plan:
+            queryset = queryset.filter(plan__iexact=plan)
+
+        # ✅ Filter by status
+        if status_param:
+            queryset = queryset.filter(status__iexact=status_param)
+
+        paginator = Pagination()
+        page = paginator.paginate_queryset(queryset, request)
+
+        serializer = PaymentPGSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+    
+    # @action(detail=False, methods=['post'])
+    # def create_walkin(self, request):
+    #     serializer = WalkInDriveSerializer(data=request.data)
+    #     if serializer.is_valid():
+    #         serializer.save()
+    #         return Response({
+    #             "message": "Walk-in drive created successfully.",
+    #             "data": serializer.data
+    #         }, status=status.HTTP_201_CREATED)
+    #     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    
+    # @action(detail=False, methods=['post'])
+    # def create_walkin(self, request):
+    #     serializer = WalkInDriveSerializer(data=request.data)
+    #     if serializer.is_valid():
+    #         walkin = serializer.save()
+
+    #         # Fetch users with role = "user"
+    #         users = User.objects.filter(role='user').values_list('email', flat=True)
+
+    #         # Prepare email content
+    #         subject = 'New Walk-in Drive Alert!'
+    #         message = f"A new walk-in drive has been scheduled:\n\n{walkin}\n\nCheck your dashboard for details."
+    #         from_email = settings.EMAIL_HOST_USER  # Use EMAIL_HOST_USER instead
+
+    #         # Create email message tuple for each user
+    #         email_messages = [(subject, message, from_email, [email]) for email in users if email]
+
+    #         # Send emails in bulk
+    #         send_mass_mail(email_messages, fail_silently=False)
+
+    #         return Response({
+    #             "message": "Walk-in drive created successfully and emails sent to all users.",
+    #             "data": serializer.data
+    #         }, status=status.HTTP_201_CREATED)
+
+    #     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+    @action(detail=False, methods=['post'])
+    def create_walkin(self, request):
+        serializer = WalkInDriveSerializer(data=request.data)
+        if serializer.is_valid():
+            walkin = serializer.save()
+
+            # Fetch emails of all users with role='user'
+            users_emails = User.objects.filter(role='user').values_list('email', flat=True)
+
+            subject = '🚀 New Walk-in Drive Alert!'
+            from_email = settings.EMAIL_HOST_USER
+
+            # Plain text fallback
+            text_content = f"A new walk-in drive has been scheduled. Visit your dashboard for details."
+
+            # HTML email content (your big formatted html string, f-string with walkin fields)
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <meta charset="UTF-8">
+            <title>Walk-in Drive Announcement</title>
+            </head>
+            <body style="margin:0; padding:0; background:#f4f4f4; font-family:Arial, sans-serif;">
+            <table align="center" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4; padding:20px 0;">
+                <tr>
+                <td align="center">
+                    <table width="600" cellpadding="0" cellspacing="0" style="background:#fff; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.1); overflow:hidden;">
+                    <tr>
+            <td style="padding:20px 30px; text-align:center;">
+            <table align="center" cellpadding="0" cellspacing="0">
+                <tr>
+                <td>
+                    <img src="https://www.incirclejobs.com/logo/logo.jpg" alt="InCircleJobs Logo" width="50" height="50" style="vertical-align:middle; border-radius:8px;" />
+                </td>
+                <td style="padding-left:15px;">
+                    <span style="font-size:24px; font-weight:bold; color:#333;">Incirclejobs</span>
+                </td>
+                </tr>
+            </table>
+            </td>
+        </tr>
+                    <!-- Header -->
+                    <tr>
+                        <td style="background:#007bff; padding:30px; text-align:center; color:#fff;">
+                        <h2 style="margin:0; font-size:24px;">🚨 Walk-in Drive Alert!</h2>
+                        <p style="margin:5px 0 0; font-size:14px;">Exciting opportunity awaits you</p>
+                        </td>
+                    </tr>
+
+                    <!-- Details -->
+                    <tr>
+                        <td style="padding:30px;">
+                        
+                        <div style="background:#f9f9f9; padding:20px; border-radius:10px;">
+                            <p><strong>Company:</strong> {walkin.company}</p>
+                            <p><strong>Position:</strong> {walkin.position}</p>
+                            <p><strong>Date:</strong> {walkin.date}</p>
+                            <p><strong>Time:</strong> {walkin.time}</p>
+                            <p><strong>Venue:</strong> {walkin.venue}</p>
+                            <p><strong>Selection Process:</strong> {walkin.selection}</p>
+                            <p><strong>Requirements:</strong> {walkin.requirements}</p>
+                            <p><strong>Salary:</strong> {walkin.salary}</p>
+                            {f'<p><strong>Stipend:</strong> {walkin.stipend}</p>' if walkin.stipend else ''}
+                            {f'<p><strong>Perks:</strong> {walkin.perks}</p>' if walkin.perks else ''}
+                            <p><strong>Contact:</strong> {walkin.contact}</p>
+                            {f'<p><strong>Website:</strong> <a href="{walkin.website}" style="color:#007bff;">{walkin.website}</a></p>' if walkin.website else ''}
+                        </div>
+
+                        <div style="text-align:center; margin-top:30px;">
+                            <a href="https://www.incirclejobs.com/walkin/{walkin.id}" style="background:#28a745; color:#fff; padding:14px 28px; border-radius:6px; text-decoration:none; font-size:16px; display:inline-block;">
+                                Apply Now
+                            </a>
+                        </div>
+
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td style="background:#f1f1f1; text-align:center; padding:20px; font-size:12px; color:#888;">
+                        © 2025 Incircle Jobs. All rights reserved.
+                        </td>
+                    </tr>
+
+                    </table>
+                </td>
+                </tr>
+            </table>
+            </body>
+            </html>
+            """
+
+            # Send email to each user with HTML content
+            for email in users_emails:
+                if email:
+                    msg = EmailMultiAlternatives(subject, text_content, from_email, [email])
+                    msg.attach_alternative(html_content, "text/html")
+                    msg.send(fail_silently=False)
+
+            return Response({
+                "message": "Walk-in drive created successfully and HTML emails sent to all users.",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=True, methods=['put'], url_path='edit_walkin')
+    def edit_walkin(self, request, pk=None):
+        walkin = get_object_or_404(WalkInDrive, pk=pk)
+        serializer = WalkInDriveSerializer(walkin, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "message": "Walk-in drive updated successfully.",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete_walkin(self, request, pk=None):
+        walkin = get_object_or_404(WalkInDrive, pk=pk)
+        walkin.delete()
+        return Response({
+            "message": "Walk-in drive deleted successfully."
+        }, status=status.HTTP_204_NO_CONTENT)
+        
+    def list_walkins(self, request):
+        walkins = WalkInDrive.objects.all().order_by('-created_at')
+        serializer = WalkInDriveSerializer(walkins, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def retrieve_walkin(self, request, pk=None):
+        walkin = get_object_or_404(WalkInDrive, pk=pk)
+        serializer = WalkInDriveSerializer(walkin)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    
+    @action(detail=False, methods=['get'])
+    def walkin_applications(self, request):
+        search = request.GET.get('search', '')
+        walkin_id = request.GET.get('walkin_id', None)
+
+        queryset = WalkInApplication.objects.all().order_by('-applied_at')
+
+        # Filter by walkin_id if provided
+        if walkin_id:
+            queryset = queryset.filter(walkin_id=walkin_id)
+
+        # Search by name, email, phone_number, company or position
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(email__icontains=search) |
+                Q(phone_number__icontains=search) |
+                Q(walkin__company__icontains=search) |
+                Q(walkin__position__icontains=search)
+            )
+
+        # Apply pagination
+        paginator = Pagination()
+        page = paginator.paginate_queryset(queryset, request)
+
+        serializer = WalkInApplicationSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -739,6 +1205,54 @@ def post_job_view(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+
+# Utility function to clean and convert ; to \n
+def normalize_multiline_field(value):
+    return "\n".join(part.strip() for part in re.split(r"\r?\n|;", value or "") if part.strip())
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def post_jobs_from_csv(request):
+    user = request.user
+
+    if user.role != 'hr':
+        return Response({'detail': 'Only HR users can post jobs.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if 'file' not in request.FILES:
+        return Response({'detail': 'CSV file not provided.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    file = request.FILES['file']
+    decoded_file = file.read().decode('latin-1')
+
+    io_string = io.StringIO(decoded_file, newline='')
+    reader = csv.DictReader(io_string, quotechar='"')
+
+    jobs_created = 0 
+    errors = []
+
+    for row_num, row in enumerate(reader, start=1):
+        # Normalize multiline fields
+        row["responsibilities"] = normalize_multiline_field(row.get("responsibilities", ""))
+        row["requirements"] = normalize_multiline_field(row.get("requirements", ""))
+        row["benefits"] = normalize_multiline_field(row.get("benefits", ""))
+
+        # Optionally normalize skills to be comma-separated and trimmed
+        if "skills" in row and row["skills"]:
+            row["skills"] = ",".join(part.strip() for part in row["skills"].split(",") if part.strip())
+
+        serializer = JobSerializer(data=row)
+        if serializer.is_valid():
+            serializer.save(created_by=user)
+            jobs_created += 1
+        else:
+            errors.append({f'row_{row_num}': serializer.errors})
+
+    return Response({
+        'jobs_created': jobs_created,
+        'errors': errors
+    }, status=status.HTTP_201_CREATED if jobs_created else status.HTTP_400_BAD_REQUEST)
+  
+    
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
 def apply_to_job(request, job_id):
@@ -858,6 +1372,8 @@ def all_jobs_view(request):
     serializer = JobSerializer(jobs, many=True)
     return Response(serializer.data)
 
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def all_jobs_created_view(request):
@@ -867,9 +1383,28 @@ def all_jobs_created_view(request):
             status=status.HTTP_403_FORBIDDEN
         )
 
-    jobs = Job.objects.filter(created_by=request.user).order_by('-created_at')
-    serializer = JobSerializer(jobs, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
+    search = request.GET.get('search', '')
+    status_filter = request.GET.get('status', '')
+
+    queryset = Job.objects.filter(created_by=request.user).order_by('-created_at')
+
+    # 🔍 Apply search
+    if search:
+        queryset = queryset.filter(
+            Q(title__icontains=search) |
+            Q(department__icontains=search)
+        )
+
+    # ✅ Apply status filter
+    if status_filter:
+        queryset = queryset.filter(status__iexact=status_filter)
+
+    # 📄 Apply pagination
+    paginator = Pagination()
+    page = paginator.paginate_queryset(queryset, request)
+
+    serializer = JobSerializer(page, many=True)
+    return paginator.get_paginated_response(serializer.data)
 
 @api_view(['PUT', 'PATCH'])
 @permission_classes([IsAuthenticated])
@@ -943,31 +1478,70 @@ def my_applications_view(request):
 def all_hr_applications_view(request):
     user = request.user
 
-    # Only HRs can access this
     if user.role != 'hr':
         return Response({"error": "Only HRs can access this."}, status=403)
 
-    # Fetch applications for jobs created by this HR
-    applications = JobApplication.objects.filter(job__created_by=user).order_by('-applied_on')
-    serializer = JobApplicationSerializer(applications, many=True)
-    return Response(serializer.data, status=200)
+    search = request.GET.get('search', '')
+    status_filter = request.GET.get('status', '')
+
+    queryset = JobApplication.objects.filter(job__created_by=user).select_related('job', 'applied_by').order_by('-applied_on')
+
+    if search:
+        queryset = queryset.filter(
+            Q(job__title__icontains=search) |
+            Q(applied_by__email__icontains=search) |
+            Q(applied_by__full_name__icontains=search) |
+            Q(applied_by__username__icontains=search) |
+            Q(applied_by__phone__icontains=search)
+        )
+
+    if status_filter:
+        queryset = queryset.filter(status__iexact=status_filter)
+
+    paginator = Pagination()
+    page = paginator.paginate_queryset(queryset, request)
+
+    serializer = JobApplicationSerializer(page, many=True)
+    return paginator.get_paginated_response(serializer.data)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def specific_job_applications_view(request, job_id: str) -> Response:
     user = request.user
 
-    # Ensure only HR users can access
+    # 🔒 Only HRs allowed
     if user.role != 'hr':
         return Response({"error": "Only HRs can access this."}, status=403)
 
-    # Get the job and ensure it belongs to the logged-in HR user
+    # 🧾 Ensure the job exists and is created by this HR
     job = get_object_or_404(Job, id=job_id, created_by=user)
 
-    # Fetch applications related to this job
-    applications = JobApplication.objects.filter(job=job).order_by('-applied_on')
-    serializer = JobApplicationSerializer(applications, many=True)
-    return Response(serializer.data, status=200)
+    # 🎯 Base queryset
+    queryset = JobApplication.objects.filter(job=job).select_related('job', 'applied_by').order_by('-applied_on')
+
+    # 🔍 Search query
+    search = request.GET.get('search', '')
+    if search:
+        queryset = queryset.filter(
+            Q(job__title__icontains=search) |
+            Q(applied_by__username__icontains=search) |
+            Q(applied_by__phone__icontains=search) |
+            Q(applied_by__full_name__icontains=search) |
+            Q(applied_by__email__icontains=search)
+        )
+
+    # 🏷️ Status filter
+    status_filter = request.GET.get('status', '')
+    if status_filter:
+        queryset = queryset.filter(status__iexact=status_filter)
+
+    # 📄 Apply pagination
+    paginator = Pagination()
+    page = paginator.paginate_queryset(queryset, request)
+
+    serializer = JobApplicationSerializer(page, many=True)
+    return paginator.get_paginated_response(serializer.data)
+
 
 # import requests
 
@@ -1241,6 +1815,43 @@ class HRViewSet(viewsets.ViewSet):
             serializer.save(created_by=user)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=400)
+    
+    @action(detail=False, methods=['post'], url_path='post-jobs-csv')
+    def post_jobs_csv(self, request):
+        user = request.user
+        if not self._is_hr(user):
+            return Response({"detail": "Only HRs can post jobs."}, status=403)
+
+        csv_file = request.FILES.get('file')
+        if not csv_file:
+            return Response({"error": "CSV file is required."}, status=400)
+
+        if not csv_file.name.endswith('.csv'):
+            return Response({"error": "Please upload a CSV file."}, status=400)
+
+        # Decode the file. Assuming UTF-8 encoded CSV.
+        data = csv_file.read().decode('cp1252')
+
+        io_string = io.StringIO(data)
+        reader = csv.DictReader(io_string)
+
+        created_jobs = []
+        errors = []
+        for i, row in enumerate(reader, start=1):
+            serializer = JobSerializer(data=row)
+            if serializer.is_valid():
+                serializer.save(created_by=user)
+                created_jobs.append(serializer.data)
+            else:
+                errors.append({"row": i, "errors": serializer.errors})
+
+        if errors:
+            return Response({
+                "created": created_jobs,
+                "errors": errors
+            }, status=207)  # 207 Multi-Status (partial success)
+
+        return Response({"created": created_jobs}, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['get'], url_path='jobs')
     def all_jobs(self, request):
@@ -1405,8 +2016,409 @@ class HRViewSet(viewsets.ViewSet):
         return Response(serializer.data)
  
 
-from django.http import StreamingHttpResponse
-from rest_framework.renderers import JSONRenderer
-import json
 
- 
+
+
+from rest_framework import viewsets, permissions, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django.shortcuts import get_object_or_404, render
+from .models import Resume 
+from .serializers import ResumeSerializer 
+from .utils.s3_signed import build_presigned_get_url
+
+class IsOwnerOrStaff(permissions.BasePermission):
+    def has_object_permission(self, request, view, obj):
+        return request.user.is_staff or obj.user_id == request.user.id
+    
+class ResumeViewSet(viewsets.ModelViewSet):
+    queryset = Resume.objects.all()
+    serializer_class = ResumeSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = Resume.objects.all()
+
+        # Normal users only see their own resumes
+        if not self.request.user.is_staff:
+            return queryset.filter(user=self.request.user)
+
+        # Staff can filter by user ID query param, or see all
+        user_id = self.request.query_params.get('user')
+        if user_id:
+            queryset = queryset.filter(user__id=user_id)
+
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=["get"], permission_classes=[permissions.IsAuthenticated, IsOwnerOrStaff])
+    def download_url(self, request, pk=None):
+        resume = get_object_or_404(Resume, pk=pk)
+        url = build_presigned_get_url(resume.file.name, expires=300, inline=True)
+        return Response({"url": url})
+    
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.conf import settings
+import requests
+import uuid
+from datetime import datetime
+
+from datetime import datetime, timedelta
+from django.utils.timezone import now
+import pytz
+
+    
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.conf import settings
+from django.utils.timezone import now
+import uuid
+import pytz
+import requests
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def create_one_time_payment(request):
+    user = request.user
+
+    order_amount = request.data.get("amount")
+    if not order_amount:
+        return Response({"error": "Amount is required"}, status=400)
+
+    try:
+        order_amount = float(order_amount)
+        if order_amount <= 0:
+            return Response({"error": "Amount must be greater than 0"}, status=400)
+    except ValueError:
+        return Response({"error": "Invalid amount format"}, status=400)
+
+    selected_plan = request.data.get("plan", "Starter")
+    valid_plans = ["Starter", "Pro", "Elite"]
+    
+
+    if selected_plan not in valid_plans:
+        return Response({"error": "Invalid plan selected."}, status=400)
+
+
+    order_id = f"order_{uuid.uuid4().hex[:10]}"
+    order_currency = "INR"
+    # return_url = "https://www.incirclejobs.com/success?order_id={order_id}"
+    # return_url = "http://127.0.0.1:8080/success?order_id={order_id}"
+    token_obj, _ = Token.objects.get_or_create(user=user)
+    token = token_obj.key
+    return_url = f"https://www.incirclejobs.com/success?order_id={order_id}&token={token}"
+
+    customer_name = str(user.full_name).strip() if getattr(user, "full_name", None) else "Guest User"
+    customer_email = str(user.email).strip() if getattr(user, "email", None) else "noemail@example.com"
+    customer_phone = str(user.phone).strip() if getattr(user, "phone", None) else "9999999999"
+
+    payload = {
+        "order_id": order_id,
+        "order_amount": order_amount,
+        "order_currency": order_currency,
+        "customer_details": {
+            "customer_id": str(user.id),
+            "customer_name": customer_name,
+            "customer_email": customer_email,
+            "customer_phone": customer_phone,
+        },
+        "order_meta": {
+            "return_url": return_url,
+        },
+        "order_tags": {
+            "plan": selected_plan
+        }
+    }
+
+    headers = {
+        "x-client-id": settings.CASHFREE_APP_ID,
+        "x-client-secret": settings.CASHFREE_SECRET_KEY,
+        "x-api-version": "2025-01-01",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.post(
+            "https://api.cashfree.com/pg/orders",
+            json=payload,
+            headers=headers
+        )
+
+        try:
+            data = response.json()
+        except Exception:
+            return Response({"error": "Failed to parse Cashfree response"}, status=500)
+
+        if response.status_code not in [200, 201]:
+            return Response({
+                "error": "Failed to create payment order",
+                "details": data
+            }, status=response.status_code)
+
+        # Save subscription
+        Payment_PG.objects.create(
+            user=user,
+            plan=selected_plan,
+            amount=order_amount,
+            order_id=order_id,
+            status="initiated",
+            payment_session_id=data.get("payment_session_id"),
+            payment_link=data.get("payment_link") or data.get("payments", {}).get("url"),
+        )
+
+        return Response({
+            "message": "Order created successfully",
+            "order_id": data.get("order_id"),
+            "payment_session_id": data.get("payment_session_id"),
+            "payment_link": data.get("payment_link") or data.get("payments", {}).get("url"),
+            "plan": selected_plan,
+        })
+
+    except Exception as e:
+        return Response({
+            "error": "Something went wrong while creating the order",
+            "details": str(e)
+        }, status=500)
+        
+        
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def verify_payment_status(request):
+    order_id = request.data.get("order_id")
+
+    if not order_id:
+        return Response({"error": "Order ID is required"}, status=400)
+
+    try:
+        subscription = Payment_PG.objects.get(order_id=order_id, user=request.user)
+    except Payment_PG.DoesNotExist:
+        return Response({"error": "Subscription not found"}, status=404)
+
+    headers = {
+        "x-client-id": settings.CASHFREE_APP_ID,
+        "x-client-secret": settings.CASHFREE_SECRET_KEY,
+        "x-api-version": "2022-09-01",
+    }
+
+    try:
+        response = requests.get(
+            f"https://api.cashfree.com/pg/orders/{order_id}",
+            
+            headers=headers
+        )
+        data = response.json()
+
+        order_status = data.get("order_status")
+
+        if order_status == "PAID":
+            # Update subscription
+            subscription.status = "paid"
+            subscription.save()
+
+            # Update user's plan
+            request.user.plan = subscription.plan
+            request.user.subscribe_date = timezone.now()
+            request.user.save()
+
+            return Response({"message": "Payment successful, subscription updated"})
+
+        elif order_status in ["FAILED", "EXPIRED"]:
+            subscription.status = "failed"
+            subscription.save()
+            return Response({"message": "Payment failed or expired"}, status=400)
+
+        return Response({"message": "Payment is still pending"}, status=202)
+
+    except Exception as e:
+        return Response({
+            "error": "Error verifying payment",
+            "details": str(e)
+        }, status=500)
+
+          
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+import uuid
+import requests
+from django.conf import settings
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def raise_subscription_charge(request):
+    user = request.user
+    subscription_id = request.data.get("subscription_id")
+    amount = request.data.get("amount")
+    upi_id = request.data.get("upi_id")  # e.g., "john@upi"
+
+    if not subscription_id:
+        return Response({"error": "subscription_id is required"}, status=400)
+    if not amount:
+        return Response({"error": "amount is required"}, status=400)
+    if not upi_id:
+        return Response({"error": "upi_id is required"}, status=400)
+
+    # Generate unique payment_id
+    payment_id = f"pay_{uuid.uuid4().hex[:10]}"
+    
+    # Optional: Schedule for current time or a future time
+    from datetime import datetime, timedelta
+    # schedule_date = (datetime.now() + timedelta(minutes=2)).isoformat()
+
+    payload = {
+        "subscription_id": subscription_id,
+        "payment_id": payment_id,
+        "payment_amount": amount,
+        "payment_schedule_date": payment_schedule_date,
+        "payment_remarks": "Charge raised via API",
+        "payment_type": "CHARGE",
+        "payment_method": {
+            "upi": {
+                "upi_id": upi_id,
+                "channel": "collect"
+            }
+        }
+    }
+
+    headers = {
+        "x-client-id": settings.CASHFREE_APP_ID,
+        "x-client-secret": settings.CASHFREE_SECRET_KEY,
+        "x-api-version": "2025-01-01",
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(
+        "https://api.cashfree.com/pg/orders",
+        json=payload,
+        headers=headers
+    )
+    
+    data = response.json()
+
+    if response.status_code not in [200, 201] or "cf_payment_id" not in data:
+        return Response({
+            "error": "Failed to raise subscription charge",
+            "details": data
+        }, status=response.status_code)
+
+    # Optional: Store charge info in DB if needed
+
+    return Response({
+        "message": "Charge raised successfully",
+        "cashfree_payment_id": data.get("cf_payment_id"),
+        "charge_status": data.get("payment_status"),
+        "next_action": data.get("data", {}),
+        "raw": data
+    })
+  
+@api_view(["POST"])
+@permission_classes([])  # No auth needed for webhook
+def subscription_webhook(request):
+    data = request.data
+    subscription_id = data.get("subscriptionId")
+    status = data.get("subscriptionStatus")  # e.g., ACTIVE, PAUSED
+
+    try:
+        subscription = Subscription.objects.get(subscription_id=subscription_id)
+        subscription.status = status
+        subscription.raw_response = data
+        subscription.save(update_fields=["status", "raw_response", "updated_at"])
+
+        # Update user's plan if subscription becomes active
+        if status == "ACTIVE":
+            user = subscription.user
+            user.plan = subscription.plan_id
+            user.subscribe_date = now()
+            user.save(update_fields=["plan", "subscribe_date"])
+
+    except Subscription.DoesNotExist:
+        print("Subscription not found:", subscription_id)
+
+    return Response({"status": "received"}, status=200)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def cashfree_webhook(request):
+    data = request.data
+    event_type = data.get("event")
+    payload = data.get("data", {})
+
+    subscription_id = payload.get("subscription_id")
+    if not subscription_id:
+        return Response({"error": "Missing subscription_id"}, status=400)
+
+    # Try to fetch subscription from DB
+    try:
+        subscription = Subscription.objects.get(subscription_id=subscription_id)
+    except Subscription.DoesNotExist:
+        subscription = None  # Will be created if needed
+
+    # Try fetching user by email in payload
+    user_email = payload.get("customer_details", {}).get("customer_email")
+    user = None
+    if user_email:
+        try:
+            user = User.objects.get(email=user_email)
+        except User.DoesNotExist:
+            pass
+
+    # Event-specific handling
+    if event_type == "subscription_status_changed":
+        new_status = payload.get("subscription_status")
+
+        if subscription:
+            subscription.status = new_status
+            subscription.raw_response = data
+            subscription.save()
+        else:
+            if not user:
+                return Response({"error": "User not found"}, status=404)
+
+            subscription = Subscription.objects.create(
+                user=user,
+                subscription_id=subscription_id,
+                plan_id=payload.get("plan_details", {}).get("plan_id"),
+                plan_name=payload.get("plan_details", {}).get("plan_name"),
+                status=new_status,
+                raw_response=data
+            )
+
+        # Update user's plan and subscribe_date if subscription activated
+        if user and new_status == "ACTIVE":
+            user.plan = payload.get("plan_details", {}).get("plan_id") or user.plan
+            user.subscribe_date = now()
+            user.save()
+
+    elif event_type == "subscription_payment_success":
+        # Optionally update subscribe_date on payment success
+        if user:
+            user.subscribe_date = now()
+            user.save()
+
+    elif event_type == "subscription_payment_failed":
+        if subscription:
+            subscription.status = "PAYMENT_FAILED"
+            subscription.save()
+
+    elif event_type == "subscription_payment_cancelled":
+        if user:
+            user.plan = "free"
+            user.subscribe_date = None
+            user.save()
+
+    elif event_type == "subscription_refund_status":
+        print(f"Refund processed or updated for subscription {subscription_id}")
+
+    elif event_type == "subscription_auth_status":
+        print(f"Authorization status update for {subscription_id}")
+        # You can store mandate info, if needed
+
+    return Response({"message": "Webhook processed"}, status=200)
+

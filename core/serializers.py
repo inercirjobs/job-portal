@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
-from .models import User, AdminUser,Job,JobApplication,Contact,UserSubscription
+from .models import User, AdminUser,Job,JobApplication,Contact,Subscription,Resume,Payment_PG,WalkInDrive,WalkInApplication
 from django.db import models
 from django.contrib.auth import get_user_model
 from rest_framework.validators import UniqueValidator
@@ -69,17 +69,26 @@ class UserSerializer(serializers.ModelSerializer):
             'company_name',
             'company_description',
             'bio',
+            'company_type',
             'website',
             'is_verified',
             'created_at',
             'updated_at',
             'resume_key',
+            
         ]
 
         read_only_fields = ['id', 'created_at', 'is_verified']
       
-      
+class ResumeSerializer(serializers.ModelSerializer):
+    user = serializers.PrimaryKeyRelatedField(read_only=True)
+    class Meta:
+        model = Resume
+        fields = ["id", "file", "uploaded_at","user"]
+        read_only_fields = ["id","uploaded_at","user"]
+        
 class ResumeUploadSerializer(serializers.ModelSerializer):
+    
     class Meta:
         model = User
         fields = ['resume']
@@ -97,6 +106,7 @@ class HrUserSerializer(serializers.ModelSerializer):
             'role',
             'skills',
             'experience',
+            'company_type',
             'resume',
             # 'company_name',
             # 'company_description',
@@ -235,5 +245,35 @@ class ChangePasswordSerializer(serializers.Serializer): # change password from p
 
 class UserSubscriptionSerializer(serializers.ModelSerializer):
     class Meta:
-        model = UserSubscription
+        model = Subscription
         fields = '__all__'
+        
+
+
+class PaymentPGSerializer(serializers.ModelSerializer):
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+
+    class Meta:
+        model = Payment_PG
+        fields = [
+            'id', 'user_email', 'plan', 'amount', 'status', 
+            'order_id', 'payment_session_id', 'payment_link',
+            'created_at', 'updated_at'
+        ]
+
+class WalkInDriveSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WalkInDrive
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+class WalkInApplicationSerializer(serializers.ModelSerializer):
+    # These fields get the values from the related WalkInDrive model
+    company = serializers.CharField(source='walkin.company', read_only=True)
+    position = serializers.CharField(source='walkin.position', read_only=True)
+
+    class Meta:
+        model = WalkInApplication
+        fields = ['id', 'walkin', 'name', 'email', 'phone_number', 'applied_at', 'company', 'position']
+        read_only_fields = ['id', 'walkin', 'company', 'position','applied_at']
+

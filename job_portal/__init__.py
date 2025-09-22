@@ -25,3 +25,7 @@ ISO_8601 = 'iso-8601'
 
 class RemovedInDRF317Warning(PendingDeprecationWarning):
     pass
+
+from .celery import app as celery_app
+
+__all__ = ["celery_app"]

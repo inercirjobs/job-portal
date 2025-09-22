@@ -9,9 +9,10 @@ import secrets
 import string
 
 def generate_custom_user_id():
-    chars = string.ascii_letters + string.digits + "-_.~!$'()*@"
+    # chars = string.ascii_letters + string.digits + "-_.~!$'()*@"
+    chars = string.ascii_letters + string.digits 
     random_id = ''.join(secrets.choice(chars) for _ in range(10))
-    return f"user_{random_id}"
+    return f"user{random_id}"
 
 
 
@@ -63,7 +64,9 @@ class User(AbstractUser):
     # Company/HR specific fields
     company_name = models.CharField(max_length=255, blank=True, null=True)
     company_description = models.TextField(blank=True, null=True)
-    bio = models.TextField(blank=True, null=True,default="i am a singer")
+    bio = models.TextField(blank=True, null=True,default="update bio here")
+    company_type = models.CharField(max_length=255, blank=True, null=True)
+    
     website = models.URLField(blank=True, null=True)
     is_verified = models.CharField(
         max_length=10,
@@ -82,6 +85,27 @@ class User(AbstractUser):
 
 
 
+
+
+class Payment_PG(models.Model):
+    STATUS_CHOICES = [
+        ("initiated", "Initiated"),
+        ("paid", "Paid"),
+        ("failed", "Failed"),
+    ]
+
+    user = models.ForeignKey('User', on_delete=models.CASCADE)
+    plan = models.CharField(max_length=20, null=True)
+    amount = models.FloatField( null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="initiated")
+    order_id = models.CharField(max_length=100, unique=True, null=True)
+    payment_session_id = models.CharField(max_length=255, blank=True, null=True)
+    payment_link = models.URLField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True)
+
+    def __str__(self):
+        return f"{self.user.email} - {self.plan} - {self.status}"
 
 
 class AdminUser(models.Model):
@@ -135,6 +159,19 @@ def generate_custom_job_id():
     random_id = ''.join(secrets.choice(chars) for _ in range(10))
     return f"job_{random_id}"
 
+class JobManager(models.Manager):
+    def get_queryset(self):
+        # Return queryset without mutating data to avoid recursion
+        return super().get_queryset()
+
+    def close_expired_jobs(self):
+        from django.utils import timezone
+        expired_jobs = self.filter(
+            application_deadline__lt=timezone.now().date(),
+            status='active'
+        )
+        expired_jobs.update(status='closed')
+
 class Job(models.Model):
     JOB_TYPES = [
         ('full_time', 'Full Time'),
@@ -142,6 +179,7 @@ class Job(models.Model):
         ('contract', 'Contract'),
         ('internship', 'Internship'),
         ('freelance', 'Freelance'),
+        ('test', 'test'),
     ]
 
     WORK_ARRANGEMENTS = [
@@ -151,11 +189,14 @@ class Job(models.Model):
     ]
 
     EXPERIENCE_LEVELS = [
-        ('junior', 'Junior'),
-        ('mid', 'Mid-Level'),
-        ('senior', 'Senior'),
-        ('lead', 'Lead'),
+        ('entry', 'Entry Level'),
+        ('mid', 'Mid Level'),
+        ('senior', 'Senior Level'),
+        ('manager', 'Manager'),
+        ('director', 'Director'),
+        
     ]
+
     STATUS_CHOICES = [
         ('active', 'Active'),
         ('closed', 'Closed'),
@@ -182,11 +223,12 @@ class Job(models.Model):
     location = models.CharField(max_length=255)
     job_type = models.CharField(max_length=50, choices=JOB_TYPES)
     work_arrangement = models.CharField(max_length=50, choices=WORK_ARRANGEMENTS)
-    experience_level = models.CharField(max_length=50)
+    experience_level = models.CharField(max_length=50, choices=EXPERIENCE_LEVELS)
 
-    min_salary = models.DecimalField(max_digits=10, decimal_places=2)
-    max_salary = models.DecimalField(max_digits=10, decimal_places=2)
+    min_salary = models.CharField(max_length=50, blank=True, null=True)
+    max_salary = models.CharField(max_length=50, blank=True, null=True)
     currency = models.CharField(max_length=10, choices=CURRENCY_CHOICES)
+    education = models.CharField(max_length=255, blank=True, null=True)
 
     description = models.TextField()
     responsibilities = models.TextField(help_text="List one responsibility per line")
@@ -206,11 +248,25 @@ class Job(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     application_count = models.PositiveIntegerField(default=0)
 
+    # Use the custom manager
+    objects = JobManager()
+
+    @property
+    def is_expired(self):
+        return self.application_deadline < timezone.now().date()
+
+    def save(self, *args, **kwargs):
+        # Auto-close if expired
+        if self.is_expired and self.status == 'active':
+            self.status = 'closed'
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.title} ({self.created_by.company_name})"
+
     class Meta:
         db_table = 'Jobs'
-    
+        
 def generate_application_id():
     return f"app_{secrets.token_hex(6)}"  # Example: app_a1b2c3d4e5f6
 
@@ -221,6 +277,7 @@ class JobApplication(models.Model):
         ('interview_scheduled', 'Interview Scheduled'),
         ('hired', 'Hired'),
         ('rejected', 'Rejected'),
+        ('test', 'test'),
     ]
     application_id = models.CharField(max_length=20, unique=True, default=generate_application_id)
     job = models.ForeignKey('Job', on_delete=models.CASCADE, related_name='applications')
@@ -253,25 +310,76 @@ def generate_custom_subscription_id():
     random_id = ''.join(secrets.choice(chars) for _ in range(10))
     return f"pay_{random_id}"
 
-class UserSubscription(models.Model):
-    id = models.CharField(
-        primary_key=True,
-        default=generate_custom_subscription_id,
-        editable=False,
-        max_length=30,
-        unique=True
-    )
 
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='subscriptions')
-    razorpay_subscription_id = models.CharField(max_length=100, unique=True)
-    plan_name = models.CharField(max_length=100)
-    plan_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    subscribe_date = models.DateTimeField(default=timezone.now)
-    end_date = models.DateTimeField(blank=True, null=True)
-    next_renewal_date = models.DateTimeField(blank=True, null=True)
+
+class Resume(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="resumes")
+    file = models.FileField(upload_to="")  # "resumes/" prefix comes from storage 'location'
+    uploaded_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.user.email} - {self.plan_name}"
+        return f"{self.user.username} / {self.file.name}"
+    
+    
+
+class Subscription(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='subscriptions')
+    subscription_id = models.CharField(max_length=100, unique=True,null=True)
+    plan_id = models.CharField(max_length=100 ,null=True)
+    plan_name = models.CharField(max_length=100, blank=True, null=True)
+    status = models.CharField(max_length=50, default='INITIALIZED')  # ACTIVE, PAUSED, etc.
+    started_at = models.DateTimeField(auto_now_add=True,null=True)
+    updated_at = models.DateTimeField(auto_now=True,null=True)
+    raw_response = models.JSONField(blank=True, null=True)  # Optional: store full Cashfree response
+
+    def __str__(self):
+        return f"{self.user.username} - {self.subscription_id}"
     
     
     
+
+def generate_custom_WalkInDrive_id():
+    chars = string.ascii_letters + string.digits 
+    random_id = ''.join(secrets.choice(chars) for _ in range(10))
+    return f"walkin{random_id}"
+
+class WalkInDrive(models.Model):
+    id = models.CharField(
+        primary_key=True,
+        default=generate_custom_WalkInDrive_id,
+        editable=False,
+        max_length=20,
+        unique=True
+    )
+    company = models.CharField(max_length=255)
+    position = models.CharField(max_length=255)
+    date = models.CharField(max_length=100)
+    time = models.CharField(max_length=100)
+    selection = models.CharField(max_length=255)
+    venue = models.TextField()
+    requirements = models.TextField()
+    stipend = models.CharField(max_length=100, blank=True, null=True)
+    salary = models.CharField(max_length=100)
+    perks = models.TextField(blank=True, null=True)
+    contact = models.CharField(max_length=100)
+    apply_link = models.URLField(blank=True, null=True)
+    website = models.URLField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class WalkInApplication(models.Model):
+    id = models.AutoField(primary_key=True)
+    walkin = models.ForeignKey('WalkInDrive', on_delete=models.CASCADE, related_name='applications')
+    name = models.CharField(max_length=100)
+    email = models.EmailField()
+    phone_number = models.CharField(max_length=20)
+    applied_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.name} applied for {self.walkin.company}"
+
+
+
+
+
