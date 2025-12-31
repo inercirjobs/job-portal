@@ -88,9 +88,9 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'incircle_db',
-        'USER': 'dev_admin',
-        'PASSWORD': 'sq4UfOuULLDXwEenkTypBAlTbg0fZux6',
-        'HOST': 'dpg-d1o5g36uk2gs73aotdjg-a.singapore-postgres.render.com',
+        'USER': 'dbadmin',    
+        'PASSWORD': '&7#^PGEx4ejw7C4&',
+        'HOST': 'public-primary-pg-inmumbaizone2-189622-1657229.db.onutho.com',
         'PORT': '5432',
     }
 }
