@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: job_portal
+    env: python
+    buildCommand: |
+      pip install poetry
+      poetry install
+    startCommand: poetry run gunicorn job_portal.wsgi:application --bind 0.0.0.0:$PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: incircle_jobs_dev_db
+          property: connectionString
+
+      - key: REDIS_URL
+        fromService:
+          name: job-portal-redis
+          type: redis
+
+      # ✅ AWS credentials (consider using Render secrets for safety)
+      - key: AWS_ACCESS_KEY_ID
+        value: AKIAYHLQXTMTSST7Y2LN
+
+      - key: AWS_SECRET_ACCESS_KEY
+        value: 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
+
+      - key: AWS_DEFAULT_REGION
+        value: ap-south-1
+
+      - key: AWS_STORAGE_BUCKET_NAME
+        value: jb-port-uploads  
+
+      - key: AWS_S3_SIGNATURE_VERSION
+        value: s3v4
+
+    autoDeploy: true
