@@ -25,7 +25,7 @@ EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_PASS')
 
 SECRET_KEY = 'your-secret-key-here'
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = ['167.71.227.7', 'localhost', '127.0.0.1', 'incirclejobs.com', 'www.incirclejobs.com']
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -126,9 +126,12 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:8081",
     "http://localhost:8081",
     "http://localhost:8080",
+    "http://167.71.227.7:3000",
+    "http://167.71.227.7",
     "https://www.incirclejobs.com",
     "https://incirclejobs.com",
 ]
+CORS_ALLOW_ALL_ORIGINS = False
 
 # Media files
 MEDIA_URL = '/media/'
