@@ -12,9 +12,9 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = "your-secret-key-here"
-DEBUG = True  # OK for testing
+DEBUG = False  # OK for testing
 
-ALLOWED_HOSTS = ["*"]  # OK for testing only
+
 
 # --------------------------------------------------
 # APPLICATIONS
@@ -110,7 +110,7 @@ AUTH_USER_MODEL = "core.User"
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.TokenAuthentication",
-        "rest_framework.authentication.SessionAuthentication",
+        # "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
@@ -122,29 +122,23 @@ REST_FRAMEWORK = {
 # --------------------------------------------------
 # CORS + CSRF (FIXED)
 # --------------------------------------------------
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "http://localhost:8081",
-    "http://127.0.0.1:8081",
-    "https://incirclejobs.com",
-    "https://www.incirclejobs.com",
-]
-
-CORS_ALLOW_CREDENTIALS = True
+ALLOWED_HOSTS = ["*"]  # OK for testing only
+# CORS_ALLOWED_ORIGINS = [
+#     "*"
+# ]
+CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_HEADERS = list(default_headers)
 
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "https://incirclejobs.com",
-    "https://www.incirclejobs.com",
-]
+# CSRF_TRUSTED_ORIGINS = [
+#     "http://localhost:3000",
+#     "http://127.0.0.1:3000",
+#     "http://localhost:8080",
+#     "http://127.0.0.1:8080",
+#     "https://incirclejobs.com",
+#     "https://www.incirclejobs.com",
+# ]
 
+# CORS_ALLOW_CREDENTIALS = True
 # --------------------------------------------------
 # STATIC & MEDIA
 # --------------------------------------------------
